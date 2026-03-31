@@ -1,0 +1,23 @@
+{
+  "name": "cleverchess",
+  "version": "1.0.0",
+  "description": "Clever Chess - Master The Board",
+  "main": "index.html",
+  "scripts": {
+    "dev": "python3 -m http.server 8000 || python -m http.server 8000",
+    "test": "echo \"No tests configured\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gowthaman2008/cleverchess.git"
+  },
+  "keywords": [
+    "chess",
+    "game"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@vercel/speed-insights": "^2.0.0"
+  }
+}
