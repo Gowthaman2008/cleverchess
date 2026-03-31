@@ -29,14 +29,23 @@
   }
 
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; }
+
+  html {
+    height: 100%;
+    height: -webkit-fill-available;
+  }
   
   body {
     background: var(--dark);
     color: var(--white);
     font-family: 'Raleway', sans-serif;
     overflow: hidden;
-    width: 100vw;
-    height: 100vh;
+    width: 100%;
+    /* Use dvh (dynamic viewport height) so mobile browser chrome doesn't collapse the board.
+       Fall back to -webkit-fill-available for older Safari, then 100vh as last resort. */
+    height: 100dvh;
+    height: -webkit-fill-available;
+    min-height: 100vh;
     position: relative;
   }
 
@@ -110,7 +119,7 @@
     transition: opacity 0.6s ease, transform 0.6s ease;
   }
   .screen.hidden {
-    opacity:0; pointer-events:none; transform:scale(0.95);
+    opacity:0; pointer-events:none;
   }
 
   /* ===== INTRO SCREEN ===== */
@@ -473,6 +482,9 @@
   /* ===== CHESS BOARD ===== */
   .board-wrapper {
     position:relative;
+    /* Use dvh (dynamic viewport height) so the board size stays stable when
+       the mobile browser address bar appears/disappears. Falls back to vh. */
+    width: min(calc(100vw - 20px), calc(100dvh - 340px), 420px);
     width: min(calc(100vw - 20px), calc(100vh - 340px), 420px);
     aspect-ratio:1;
     margin: clamp(3px,1vh,8px) 0;
@@ -514,6 +526,7 @@
     cursor:pointer;
     position:relative; overflow:hidden;
     transition:background-color 0.2s;
+    touch-action: manipulation;
   }
   .cell.light{background:var(--board-light);}
   .cell.dark{background:var(--board-dark);}
@@ -539,8 +552,19 @@
     line-height:1;
     text-shadow: 0 2px 4px rgba(0,0,0,0.5);
     cursor:pointer;
+    touch-action: manipulation;
   }
   .piece:active{transform:scale(1.15);}
+  .piece-white {
+    color: #ffffff;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 1px rgba(0,0,0,0.3);
+    filter: drop-shadow(0 1px 1px rgba(0,0,0,0.3));
+  }
+  .piece-black {
+    color: #222222;
+    text-shadow: 0 1px 2px rgba(255,255,255,0.15), 0 0 1px rgba(0,0,0,0.2);
+    filter: drop-shadow(0 1px 1px rgba(0,0,0,0.2));
+  }
   
   /* Moving animation overlay */
   .piece-moving {
@@ -1433,8 +1457,11 @@ function showScreen(id){
   });
   const target=document.getElementById(id);
   target.style.display='flex';
-  // Small delay so display:flex is painted before removing hidden (smooth transition)
-  requestAnimationFrame(()=>{ target.classList.remove('hidden'); });
+  // Double rAF: first frame lets display:flex apply, second removes hidden for the transition.
+  // Single rAF is unreliable on mobile WebViews and can leave screens blank.
+  requestAnimationFrame(()=>{
+    requestAnimationFrame(()=>{ target.classList.remove('hidden'); });
+  });
   if(id==='settingsScreen'){buildBoardThemes();applyTheme();}
   if(id==='statsScreen') updateStats();
 }
@@ -1485,6 +1512,7 @@ function initBoard(){
   enPassantTarget=null; totalMoves=0; lastMove=null;
   castlingRights={wK:true,wQ:true,bK:true,bQ:true};
   promotionPending=null;
+  aiThinking=false;
 }
 
 function startGame(mode, difficulty='medium'){
@@ -1546,12 +1574,29 @@ function renderBoard(){
     
     if(piece){
       const span=document.createElement('span');
-      span.className='piece';
+      const isWhitePiece = piece === piece.toUpperCase();
+      span.className='piece ' + (isWhitePiece ? 'piece-white' : 'piece-black');
       span.textContent=PIECES[piece]||piece;
       cell.appendChild(span);
     }
     
-    cell.addEventListener('click',()=>handleCellClick(displayIdx));
+    // Use touchstart for instant response on mobile; fall back to click on desktop.
+    // Tracking touchMoved prevents accidental clicks when the user is scrolling.
+    let touchMoved = false;
+    cell.addEventListener('touchstart', (e)=>{
+      touchMoved = false;
+    }, {passive: true});
+    cell.addEventListener('touchmove', ()=>{ touchMoved = true; }, {passive: true});
+    cell.addEventListener('touchend', (e)=>{
+      if(touchMoved) return;
+      e.preventDefault(); // block the subsequent ghost click
+      handleCellClick(displayIdx);
+    }, {passive: false});
+    cell.addEventListener('click', (e)=>{
+      // Only handle click on non-touch devices (touch devices fire touchend above)
+      if(e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+      handleCellClick(displayIdx);
+    });
     container.appendChild(cell);
   }
 }
@@ -1577,8 +1622,9 @@ function handleCellClick(idx){
     if(isMyPiece){ selectedCell=idx; possibleMoves=getLegalMoves(idx); playSound('select'); renderBoard(); return; }
     
     if(possibleMoves.includes(idx)){
-      animateAndMove(selectedCell, idx, ()=>{
-        executeMove(selectedCell,idx);
+      const fromIdx=selectedCell; // capture before animation clears it
+      animateAndMove(fromIdx, idx, ()=>{
+        executeMove(fromIdx,idx);
         selectedCell=null; possibleMoves=[];
         renderBoard(); updateStatus();
         if(gameMode==='ai'&&currentTurn==='b'&&gameActive){
@@ -1601,38 +1647,72 @@ function animateAndMove(fromIdx, toIdx, callback){
     if(parseInt(c.dataset.idx)===fromIdx) fromCell=c;
     if(parseInt(c.dataset.idx)===toIdx) toCell=c;
   });
-  if(!fromCell||!toCell){callback();return;}
-  
+  // Early exits: just invoke callback — the callback is always responsible for renderBoard()
+  if(!fromCell||!toCell){ callback(); return; }
+
   const pieceEl=fromCell.querySelector('.piece');
-  if(!pieceEl){callback();return;}
-  
+  if(!pieceEl){ callback(); return; }
+
   const fromRect=fromCell.getBoundingClientRect();
   const toRect=toCell.getBoundingClientRect();
-  
+
+  // On mobile WebViews getBoundingClientRect returns zeros when layout hasn't painted.
+  // Only skip animation if the cell has zero SIZE (not zero position — top-left cell is at 0,0 legitimately).
+  if(fromRect.width===0||fromRect.height===0||toRect.width===0||toRect.height===0){
+    callback();
+    return;
+  }
+
   const ghost=document.createElement('div');
   ghost.className='piece-moving';
   ghost.textContent=pieceEl.textContent;
+  // Preserve piece color on the animation ghost
+  const movingPiece = board[fromIdx];
+  if(movingPiece){
+    const isWhiteGhost = movingPiece === movingPiece.toUpperCase();
+    ghost.style.color = isWhiteGhost ? '#ffffff' : '#000000';
+    ghost.style.textShadow = isWhiteGhost
+      ? '0 1px 3px rgba(0,0,0,0.4)'
+      : '0 1px 2px rgba(255,255,255,0.15)';
+  }
   ghost.style.left=fromRect.left+'px';
   ghost.style.top=fromRect.top+'px';
   ghost.style.fontSize=window.getComputedStyle(pieceEl).fontSize;
   document.body.appendChild(ghost);
-  
-  // Hide original piece during animation
+
   pieceEl.style.opacity='0';
-  
+
   const duration=settings.animSpeed==='slow'?500:settings.animSpeed==='fast'?150:280;
   const startTime=performance.now();
   const dx=toRect.left-fromRect.left;
   const dy=toRect.top-fromRect.top;
-  
+  let animDone=false;
+
+  function finish(){
+    if(animDone) return;
+    animDone=true;
+    try{ document.body.removeChild(ghost); }catch(e){}
+    callback();
+  }
+
+  // Safety: if rAF stalls (background tab / WebView pause), force-finish after duration+500ms.
+  // Do NOT call renderBoard() here — callback handles it, calling it here
+  // before callback fires causes double-render + potential stack overflow on mobile.
+  const safetyTimer=setTimeout(()=>{ finish(); }, duration+500);
+
   function anim(now){
+    if(animDone){ clearTimeout(safetyTimer); return; }
     const t=Math.min((now-startTime)/duration,1);
     const ease=t<0.5?4*t*t*t:(t-1)*(2*t-2)*(2*t-2)+1;
     ghost.style.left=(fromRect.left+dx*ease)+'px';
     ghost.style.top=(fromRect.top+dy*ease)+'px';
     ghost.style.transform=`scale(${1+0.1*Math.sin(Math.PI*t)})`;
-    if(t<1) requestAnimationFrame(anim);
-    else { document.body.removeChild(ghost); callback(); }
+    if(t<1){
+      requestAnimationFrame(anim);
+    } else {
+      clearTimeout(safetyTimer);
+      finish();
+    }
   }
   requestAnimationFrame(anim);
 }
@@ -1808,12 +1888,16 @@ function getPseudoMoves(idx,piece){
   if(p==='n'||p==='k'){
     (dirs[p]||[]).forEach(([dr,dc])=>addMove(row+dr,col+dc));
     if(p==='k'){
-      if(isWhite){
-        if(castlingRights.wK&&!board[61]&&!board[62]&&!isSquareAttacked(60,'b')&&!isSquareAttacked(61,'b')&&!isSquareAttacked(62,'b')) moves.push(62);
-        if(castlingRights.wQ&&!board[59]&&!board[58]&&!board[57]&&!isSquareAttacked(60,'b')&&!isSquareAttacked(59,'b')&&!isSquareAttacked(58,'b')) moves.push(58);
-      } else {
-        if(castlingRights.bK&&!board[5]&&!board[6]&&!isSquareAttacked(4,'w')&&!isSquareAttacked(5,'w')&&!isSquareAttacked(6,'w')) moves.push(6);
-        if(castlingRights.bQ&&!board[3]&&!board[2]&&!board[1]&&!isSquareAttacked(4,'w')&&!isSquareAttacked(3,'w')&&!isSquareAttacked(2,'w')) moves.push(2);
+      // Skip castling move generation when we're inside isSquareAttacked — calling
+      // isSquareAttacked here while already inside it causes infinite mutual recursion.
+      if(!_checkingAttack){
+        if(isWhite){
+          if(castlingRights.wK&&!board[61]&&!board[62]&&!isSquareAttacked(60,'b')&&!isSquareAttacked(61,'b')&&!isSquareAttacked(62,'b')) moves.push(62);
+          if(castlingRights.wQ&&!board[59]&&!board[58]&&!board[57]&&!isSquareAttacked(60,'b')&&!isSquareAttacked(59,'b')&&!isSquareAttacked(58,'b')) moves.push(58);
+        } else {
+          if(castlingRights.bK&&!board[5]&&!board[6]&&!isSquareAttacked(4,'w')&&!isSquareAttacked(5,'w')&&!isSquareAttacked(6,'w')) moves.push(6);
+          if(castlingRights.bQ&&!board[3]&&!board[2]&&!board[1]&&!isSquareAttacked(4,'w')&&!isSquareAttacked(3,'w')&&!isSquareAttacked(2,'w')) moves.push(2);
+        }
       }
     }
   } else {
@@ -1832,15 +1916,22 @@ function isKingInCheck(color){
   return isSquareAttacked(ki,color==='w'?'b':'w');
 }
 
+// Guard flag: prevents getPseudoMoves(king) -> isSquareAttacked -> getPseudoMoves(enemy king)
+// -> isSquareAttacked -> getPseudoMoves(king) infinite mutual recursion during castling checks.
+let _checkingAttack = false;
+
 function isSquareAttacked(idx, byColor){
+  const wasChecking = _checkingAttack;
+  _checkingAttack = true;
   for(let i=0;i<64;i++){
     const p=board[i];
     if(!p) continue;
     if(byColor==='w'&&p!==p.toUpperCase()) continue;
     if(byColor==='b'&&p!==p.toLowerCase()) continue;
     const pm=getPseudoMoves(i,p);
-    if(pm.includes(idx)) return true;
+    if(pm.includes(idx)){ _checkingAttack=wasChecking; return true; }
   }
+  _checkingAttack=wasChecking;
   return false;
 }
 
@@ -1879,16 +1970,28 @@ function evaluateBoard(){
   return score;
 }
 
+// Node counter reset before each AI search to cap total work.
+// Mobile JS engines have small stack limits (~5-10k frames); minimax at depth 3
+// with 30+ moves per position can hit tens of thousands of recursive calls.
+// The node cap + depth-first early return prevents stack overflow.
+let _mmNodes = 0;
+const MM_NODE_LIMIT = 6000;
+
 function minimax(depth, alpha, beta, maximizing){
+  // IMPORTANT: check depth===0 FIRST, before any move generation.
+  // Old code called getAllLegalMoves() unconditionally, wasting stack frames at leaves.
+  _mmNodes++;
+  if(depth===0 || _mmNodes>=MM_NODE_LIMIT) return evaluateBoard();
+
   const moves=getAllLegalMoves(maximizing?'w':'b');
-  if(depth===0||moves.length===0) return evaluateBoard();
-  
+  if(moves.length===0) return evaluateBoard();
+
   if(maximizing){
     let best=-Infinity;
     for(const m of moves){
       const saved=board.slice(),savedEP=enPassantTarget,savedCR={...castlingRights},savedTurn=currentTurn;
       board[m.to]=board[m.from]; board[m.from]='';
-      if(board[m.to].toLowerCase()==='p'&&m.to===savedEP) board[m.to+(currentTurn==='w'?8:-8)]='';
+      if(board[m.to].toLowerCase()==='p'&&m.to===savedEP) board[m.to+(savedTurn==='w'?8:-8)]='';
       currentTurn=currentTurn==='w'?'b':'w';
       const val=minimax(depth-1,alpha,beta,false);
       board.splice(0,64,...saved); enPassantTarget=savedEP; castlingRights={...savedCR}; currentTurn=savedTurn;
@@ -1911,35 +2014,52 @@ function minimax(depth, alpha, beta, maximizing){
   }
 }
 
+let aiThinking=false;
+
 function doAIMove(){
   if(!gameActive||currentTurn!=='b') return;
-  const moves=getAllLegalMoves('b');
-  if(!moves.length) return;
-  
-  let bestMove=null;
-  let bestVal=Infinity;
-  const depth=aiDifficulty==='easy'?1:aiDifficulty==='medium'?2:3;
-  const noise=aiDifficulty==='easy'?150:aiDifficulty==='medium'?30:0;
-  
-  // Shuffle for variety
-  moves.sort(()=>Math.random()-0.5);
-  
-  for(const m of moves){
-    const saved=board.slice(),savedEP=enPassantTarget,savedCR={...castlingRights},savedTurn=currentTurn;
-    board[m.to]=board[m.from]; board[m.from]='';
-    if(board[m.to].toLowerCase()==='p'&&m.to===savedEP) board[m.to+(currentTurn==='w'?8:-8)]='';
-    currentTurn=currentTurn==='w'?'b':'w';
-    const val=minimax(depth-1,-Infinity,Infinity,true)+(Math.random()-0.5)*noise;
-    board.splice(0,64,...saved); enPassantTarget=savedEP; castlingRights={...savedCR}; currentTurn=savedTurn;
-    if(val<bestVal){bestVal=val;bestMove=m;}
-  }
-  
-  if(bestMove){
-    animateAndMove(bestMove.from, bestMove.to, ()=>{
-      executeMove(bestMove.from, bestMove.to);
+  if(aiThinking) return; // prevent double-invocation on mobile
+  aiThinking=true;
+
+  // Yield to the browser so it can finish painting the last move before
+  // the synchronous minimax blocks the main thread. Without this, mobile
+  // WebViews freeze and the board goes blank.
+  setTimeout(()=>{
+    if(!gameActive||currentTurn!=='b'){ aiThinking=false; return; }
+
+    const moves=getAllLegalMoves('b');
+    if(!moves.length){ aiThinking=false; return; }
+
+    let bestMove=null;
+    let bestVal=Infinity;
+    const depth=aiDifficulty==='easy'?1:aiDifficulty==='medium'?2:3;
+    _mmNodes=0; // reset node counter before each full search
+    const noise=aiDifficulty==='easy'?150:aiDifficulty==='medium'?30:0;
+
+    // Shuffle for variety
+    moves.sort(()=>Math.random()-0.5);
+
+    for(const m of moves){
+      const saved=board.slice(),savedEP=enPassantTarget,savedCR={...castlingRights},savedTurn=currentTurn;
+      board[m.to]=board[m.from]; board[m.from]='';
+      if(board[m.to].toLowerCase()==='p'&&m.to===savedEP) board[m.to+(currentTurn==='b'?8:-8)]='';
+      currentTurn=currentTurn==='w'?'b':'w';
+      const val=minimax(depth-1,-Infinity,Infinity,true)+(Math.random()-0.5)*noise;
+      board.splice(0,64,...saved); enPassantTarget=savedEP; castlingRights={...savedCR}; currentTurn=savedTurn;
+      if(val<bestVal){bestVal=val;bestMove=m;}
+    }
+
+    if(bestMove){
+      animateAndMove(bestMove.from, bestMove.to, ()=>{
+        aiThinking=false;
+        executeMove(bestMove.from, bestMove.to);
+        renderBoard(); updateStatus();
+      });
+    } else {
+      aiThinking=false;
       renderBoard(); updateStatus();
-    });
-  }
+    }
+  }, 50); // 50ms gives the browser one paint frame before AI blocks the thread
 }
 
 // =====================================================
