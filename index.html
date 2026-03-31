@@ -40,6 +40,60 @@
     position: relative;
   }
 
+  /* ===== CUSTOM CONFIRM MODAL ===== */
+  #confirmModal {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0,0,0,0.85);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.25s;
+  }
+  #confirmModal.active { opacity: 1; pointer-events: all; }
+  .confirm-box {
+    background: linear-gradient(135deg, #12121a, #1a1a2e);
+    border: 1px solid rgba(255,215,0,0.35);
+    border-radius: 22px;
+    padding: 30px 28px 22px;
+    width: 88%; max-width: 320px;
+    text-align: center;
+    box-shadow: 0 0 50px rgba(123,47,255,0.35);
+    transform: scale(0.9);
+    transition: transform 0.25s;
+  }
+  #confirmModal.active .confirm-box { transform: scale(1); }
+  .confirm-icon { font-size: 38px; margin-bottom: 10px; }
+  .confirm-title {
+    font-family: 'Cinzel', serif;
+    font-size: 17px; color: var(--gold);
+    margin-bottom: 8px; letter-spacing: 1px;
+  }
+  .confirm-msg {
+    font-size: 13px; color: rgba(255,255,255,0.55);
+    margin-bottom: 22px; line-height: 1.5;
+  }
+  .confirm-btns { display: flex; gap: 10px; }
+  .confirm-yes {
+    flex: 1; padding: 13px;
+    background: linear-gradient(135deg, #7b2fff, #4a0e9e);
+    border: none; border-radius: 12px;
+    color: var(--gold); font-family: 'Cinzel', serif;
+    font-size: 14px; font-weight: 700;
+    letter-spacing: 1px; cursor: pointer;
+    transition: transform 0.15s, opacity 0.15s;
+  }
+  .confirm-yes:active { transform: scale(0.95); }
+  .confirm-no {
+    flex: 1; padding: 13px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    color: rgba(255,255,255,0.6); font-family: 'Cinzel', serif;
+    font-size: 14px; font-weight: 600;
+    letter-spacing: 1px; cursor: pointer;
+    transition: transform 0.15s;
+  }
+  .confirm-no:active { transform: scale(0.95); }
+
   /* ===== PARTICLE CANVAS ===== */
   #particleCanvas {
     position: fixed; top:0; left:0; width:100%; height:100%;
@@ -905,6 +959,19 @@
 </div>
 
 <!-- ===== GAME SCREEN ===== -->
+<!-- ===== CUSTOM CONFIRM MODAL ===== -->
+<div id="confirmModal">
+  <div class="confirm-box">
+    <div class="confirm-icon" id="confirmIcon">❓</div>
+    <div class="confirm-title" id="confirmTitle">Are you sure?</div>
+    <div class="confirm-msg" id="confirmMsg">This action cannot be undone.</div>
+    <div class="confirm-btns">
+      <button class="confirm-yes" id="confirmYesBtn" onclick="confirmYes()">Yes</button>
+      <button class="confirm-no" onclick="closeConfirmModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div id="gameScreen" class="screen hidden">
   <div class="game-header">
     <button class="back-btn" onclick="confirmBack()">◀</button>
@@ -1360,8 +1427,14 @@ function setPieceStyle(s,btn){
 // SCREEN MANAGEMENT
 // =====================================================
 function showScreen(id){
-  document.querySelectorAll('.screen').forEach(s=>s.classList.add('hidden'));
-  document.getElementById(id).classList.remove('hidden');
+  document.querySelectorAll('.screen').forEach(s=>{
+    s.classList.add('hidden');
+    s.style.display='none';
+  });
+  const target=document.getElementById(id);
+  target.style.display='flex';
+  // Small delay so display:flex is painted before removing hidden (smooth transition)
+  requestAnimationFrame(()=>{ target.classList.remove('hidden'); });
   if(id==='settingsScreen'){buildBoardThemes();applyTheme();}
   if(id==='statsScreen') updateStats();
 }
@@ -1962,20 +2035,61 @@ function showHint(){
   setTimeout(()=>{selectedCell=null;possibleMoves=[];renderBoard();},2000);
 }
 
+// =====================================================
+// CUSTOM CONFIRM MODAL
+// =====================================================
+let _confirmCallback = null;
+
+function showConfirmModal(icon, title, msg, yesLabel, callback) {
+  document.getElementById('confirmIcon').textContent = icon;
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMsg').textContent = msg;
+  document.getElementById('confirmYesBtn').textContent = yesLabel;
+  _confirmCallback = callback;
+  const m = document.getElementById('confirmModal');
+  m.style.pointerEvents = 'all';
+  m.classList.add('active');
+}
+
+function closeConfirmModal() {
+  const m = document.getElementById('confirmModal');
+  m.classList.remove('active');
+  m.style.pointerEvents = 'none';
+  _confirmCallback = null;
+}
+
+function confirmYes() {
+  const cb = _confirmCallback;
+  _confirmCallback = null;
+  const m = document.getElementById('confirmModal');
+  m.classList.remove('active');
+  m.style.pointerEvents = 'none';
+  if (typeof cb === 'function') setTimeout(cb, 60);
+}
+
 function resignGame(){
   if(!gameActive) return;
-  if(confirm('Are you sure you want to resign?')){
-    endGame(currentTurn==='w'?'Black':'White','resignation');
-  }
+  showConfirmModal(
+    '🏳️',
+    'Resign Game?',
+    'You will forfeit this game. This cannot be undone.',
+    'Resign',
+    function(){ endGame(currentTurn==='w'?'Black':'White','resignation'); }
+  );
 }
 
 function confirmBack(){
   if(gameActive){
-    if(confirm('Return to main menu? Current game will be lost.')){
-      clearInterval(timerInterval); gameActive=false;
-      showScreen('menuScreen');
-    }
-  } else { showScreen('menuScreen'); }
+    showConfirmModal(
+      '🚪',
+      'Return to Menu?',
+      'Your current game will be lost.',
+      'Leave',
+      function(){ clearInterval(timerInterval); gameActive=false; showScreen('menuScreen'); }
+    );
+  } else {
+    showScreen('menuScreen');
+  }
 }
 
 // =====================================================
@@ -2070,6 +2184,11 @@ function updateStats(){
 // INTRO SEQUENCE
 // =====================================================
 window.addEventListener('load',()=>{
+  // Set all screens to display:none upfront so hidden ones never block touches on Android
+  document.querySelectorAll('.screen').forEach(s=>{ s.style.display='none'; });
+  const intro = document.getElementById('introScreen');
+  intro.style.display = 'flex';
+  intro.classList.remove('hidden');
   buildBoardThemes(); applyTheme();
   setTimeout(()=>{
     showScreen('menuScreen');
