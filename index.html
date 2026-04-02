@@ -781,6 +781,20 @@
   @keyframes confettiFall {
     to{transform:translateY(120vh) rotate(720deg);opacity:0}
   }
+  .show-board-btn {
+    margin-top:10px;
+    padding:12px 34px;
+    background:linear-gradient(135deg, rgba(0,245,255,0.12), rgba(0,245,255,0.06));
+    border:1px solid rgba(0,245,255,0.4);
+    border-radius:50px;font-family:'Cinzel',serif;
+    font-size:clamp(13px,3.5vw,15px);color:var(--accent);
+    cursor:pointer;transition:all 0.2s;
+    position:relative;z-index:5;
+    animation:fadeInUp 0.8s ease backwards 1.45s;
+    letter-spacing:1px;font-weight:700;
+    box-shadow:0 4px 20px rgba(0,245,255,0.15);
+  }
+  .show-board-btn:active{transform:scale(0.97);background:rgba(0,245,255,0.15);}
   .draw-btn {
     margin-top:10px;
     padding:10px 30px;
@@ -1312,7 +1326,38 @@
   </div>
   
   <button class="play-again-btn" onclick="playAgain()">♟ Play Again</button>
+  <button class="show-board-btn" onclick="showFinalBoard()">🔍 Show Board</button>
   <button class="draw-btn" onclick="showScreen('menuScreen')">← Main Menu</button>
+</div>
+
+<!-- ===== BOARD REVIEW OVERLAY ===== -->
+<div id="boardReviewOverlay" style="
+  position:fixed; inset:0; z-index:9000;
+  background:rgba(0,0,0,0.96);
+  display:none; flex-direction:column;
+  align-items:center; justify-content:flex-start;
+  padding: 16px 10px 16px;
+  overflow-y:auto;
+">
+  <div style="width:100%;max-width:420px;display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-shrink:0;">
+    <div style="font-family:'Cinzel',serif;font-size:clamp(13px,3.5vw,17px);color:var(--gold);letter-spacing:2px;">📋 FINAL POSITION</div>
+    <button onclick="closeBoardReview()" style="
+      padding:8px 18px;
+      background:linear-gradient(135deg,var(--purple2),var(--purple));
+      border:1px solid rgba(255,215,0,0.3);
+      border-radius:20px;
+      font-family:'Cinzel',serif;font-size:12px;
+      color:var(--gold);letter-spacing:1px;
+      cursor:pointer;font-weight:700;
+    ">✕ Close</button>
+  </div>
+  <div id="reviewResultBadge" style="
+    font-family:'Cinzel',serif;font-size:clamp(11px,3vw,14px);
+    color:rgba(255,215,0,0.75);letter-spacing:2px;
+    margin-bottom:10px;text-align:center;flex-shrink:0;
+  "></div>
+  <div id="reviewBoardWrap" style="width:100%;max-width:420px;flex-shrink:0;"></div>
+  <div style="margin-top:14px;font-size:11px;color:rgba(255,255,255,0.3);letter-spacing:1px;font-family:'Cinzel',serif;flex-shrink:0;">Read-only view • Game ended here</div>
 </div>
 
 <script>
@@ -2269,6 +2314,87 @@ function launchConfetti(){
     p.style.borderRadius=Math.random()>0.5?'50%':'2px';
     container.appendChild(p);
   }
+}
+
+// =====================================================
+// BOARD REVIEW (Show Board after game ends)
+// =====================================================
+function showFinalBoard(){
+  const overlay = document.getElementById('boardReviewOverlay');
+  const wrap = document.getElementById('reviewBoardWrap');
+  const badge = document.getElementById('reviewResultBadge');
+
+  // Set result badge text
+  const winnerText = document.getElementById('winnerText').textContent;
+  const subtitleText = document.getElementById('winnerSubtitle').textContent;
+  badge.textContent = winnerText + '  ·  ' + subtitleText;
+
+  // Build a read-only board snapshot using the current board state
+  const size = Math.min(window.innerWidth - 20, 420);
+  const cellSize = Math.floor(size / 8);
+  const actualSize = cellSize * 8;
+
+  const PIECE_UNICODE = {
+    'K':'♔','Q':'♕','R':'♖','B':'♗','N':'♘','P':'♙',
+    'k':'♚','q':'♛','r':'♜','b':'♝','n':'♞','p':'♟'
+  };
+
+  let html = `<div style="position:relative;width:${actualSize}px;margin:0 auto;">`;
+
+  // Board squares
+  html += `<div style="display:grid;grid-template-columns:repeat(8,${cellSize}px);grid-template-rows:repeat(8,${cellSize}px);border:2px solid rgba(255,215,0,0.4);border-radius:6px;overflow:hidden;">`;
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const idx = r*8+c;
+      const isLight = (r+c)%2===0;
+      const bg = isLight ? 'var(--board-light)' : 'var(--board-dark)';
+      const piece = board[idx];
+
+      // Highlight last move squares
+      let overlay_style = '';
+      if(lastMove && (lastMove.from===idx || lastMove.to===idx)){
+        overlay_style = 'box-shadow:inset 0 0 0 3px rgba(255,215,0,0.6);';
+      }
+      // Highlight king in check
+      if(piece && piece.toLowerCase()==='k'){
+        const side = piece==='k'?'b':'w';
+        if(isKingInCheck(side)){
+          overlay_style = 'box-shadow:inset 0 0 0 3px rgba(255,50,50,0.8);background:rgba(255,50,50,0.25)!important;';
+        }
+      }
+
+      const pieceChar = piece ? (PIECE_UNICODE[piece]||'') : '';
+      const isWhitePiece = piece && piece===piece.toUpperCase() && piece!==piece.toLowerCase();
+      const pieceColor = isWhitePiece ? '#ffffff' : '#111111';
+      const pieceShadow = isWhitePiece
+        ? 'text-shadow:0 1px 3px rgba(0,0,0,0.8),0 0 6px rgba(0,0,0,0.5);'
+        : 'text-shadow:0 1px 3px rgba(255,255,255,0.2),0 0 6px rgba(0,0,0,0.6);';
+
+      html += `<div style="width:${cellSize}px;height:${cellSize}px;background:${bg};${overlay_style}display:flex;align-items:center;justify-content:center;font-size:${Math.floor(cellSize*0.7)}px;color:${pieceColor};${pieceShadow}cursor:default;">${pieceChar}</div>`;
+    }
+  }
+  html += '</div>';
+
+  // Rank & file labels
+  html += `<div style="position:absolute;top:2px;right:-14px;display:flex;flex-direction:column;">`;
+  for(let r=0;r<8;r++){
+    html += `<div style="height:${cellSize}px;display:flex;align-items:center;font-size:9px;color:rgba(255,215,0,0.5);font-family:'Cinzel',serif;">${8-r}</div>`;
+  }
+  html += '</div>';
+  html += `<div style="position:absolute;bottom:-14px;left:2px;display:flex;">`;
+  'abcdefgh'.split('').forEach(l=>{
+    html += `<div style="width:${cellSize}px;text-align:center;font-size:9px;color:rgba(255,215,0,0.5);font-family:'Cinzel',serif;">${l}</div>`;
+  });
+  html += '</div>';
+
+  html += '</div>';
+
+  wrap.innerHTML = html;
+  overlay.style.display = 'flex';
+}
+
+function closeBoardReview(){
+  document.getElementById('boardReviewOverlay').style.display = 'none';
 }
 
 function playAgain(){
